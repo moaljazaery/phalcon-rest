@@ -18,6 +18,11 @@ $loader->registerNamespaces(array(
 	'PhalconRest\Responses' => __DIR__ . '/responses/'
 ))->register();
 
+$config = new IniConfig('./config/config.ini');
+if (is_readable('./config/config.ini.dev')) {
+	$override = new IniConfig('./config/config.ini.dev');
+	$config->merge($override);
+}
 /**
  * The DI is our direct injector.  It will store pointers to all of our services
  * and we will insert it into all of our controllers.
@@ -39,8 +44,8 @@ $di->set('collections', function(){
  * If the second parameter is a function, then the service is lazy-loaded
  * on its first instantiation.
  */
-$di->setShared('config', function() {
-	return new IniConfig("config/config.ini");
+$di->setShared('config', function($config) {
+	return $config;
 });
 
 // As soon as we request the session service, it will be started.
@@ -66,12 +71,15 @@ $di->set('modelsCache', function() {
 });
 
 /**
- * Database setup.  Here, we'll use a simple SQLite database of Disney Princesses.
+ * Database connection is created based in the parameters defined in the configuration file
  */
-$di->set('db', function(){
-	return new \Phalcon\Db\Adapter\Pdo\Sqlite(array(
-		'data/database.sqlite'
-	));
+$di->set('db', function () use ($config) {
+	$config = $config->get('database')->toArray();
+
+	$dbClass = 'Phalcon\Db\Adapter\Pdo\\' . $config['adapter'];
+	unset($config['adapter']);
+
+	return new $dbClass($config);
 });
 
 /**
@@ -225,7 +233,7 @@ $app->after(function() use ($app) {
 
 		$response = new \PhalconRest\Responses\JSONResponse();
 		$response->useEnvelope(true) //this is default behavior
-			->convertSnakeCase(true) //this is also default behavior
+			->convertSnakeCase(false) //this is also default behavior
 			->send($records);
 
 		return;

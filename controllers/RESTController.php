@@ -1,5 +1,6 @@
 <?php
 namespace PhalconRest\Controllers;
+use Phalcon\Paginator\Adapter\Model;
 use \PhalconRest\Exceptions\HTTPException;
 
 /**
@@ -15,7 +16,7 @@ use \PhalconRest\Exceptions\HTTPException;
  *     offset=20
  *
  */
-class RESTController extends \PhalconRest\Controllers\BaseController{
+Abstract class RESTController extends \PhalconRest\Controllers\BaseController{
 
 	/**
 	 * If query string contains 'q' parameter.
@@ -56,6 +57,12 @@ class RESTController extends \PhalconRest\Controllers\BaseController{
 	protected $partialFields = null;
 
 	/**
+	 * Array of fields requested to be excluded
+	 * @var array
+	 */
+	protected $excludeFields = null;
+
+	/**
 	 * Sets which fields may be searched against, and which fields are allowed to be returned in
 	 * partial responses.  This will be overridden in child Controllers that support searching
 	 * and partial responses.
@@ -65,6 +72,19 @@ class RESTController extends \PhalconRest\Controllers\BaseController{
 		'search' => array(),
 		'partials' => array()
 	);
+
+	/**
+	 * Model Field
+	 * @var array
+	 */
+	protected $modelFields = array('full_name','email','address','user_type','phone','created_at');
+
+	/**
+	 * @var \Phalcon\Mvc\Model
+	 */
+	protected $model;
+
+
 
 
 	/**
@@ -78,9 +98,15 @@ class RESTController extends \PhalconRest\Controllers\BaseController{
 		if ($parseQueryString){
 			$this->parseRequest($this->allowedFields);
 		}
+		$this->model=$this->getModel();
+		$metaData = new \Phalcon\Mvc\Model\MetaData\Memory();
+		$this->modelFields = $metaData->getAttributes($this->model);
+
 
 		return;
 	}
+
+	abstract public function getModel();
 
 	/**
 	 * Parses out the search parameters from a request.
@@ -108,6 +134,30 @@ class RESTController extends \PhalconRest\Controllers\BaseController{
 
 		return $mapped;
 	}
+
+
+	private function array_remove_keys($array, $keys = array()) {
+
+		// If array is empty or not an array at all, don't bother
+		// doing anything else.
+		if(empty($array) || (! is_array($array))) {
+			return $array;
+		}
+
+		// At this point if $keys is not an array, we can't do anything with it.
+		if(! is_array($keys)) {
+			return $array;
+		}
+
+		// array_diff_key() expected an associative array.
+		$assocKeys = array();
+		foreach($keys as $key) {
+			$assocKeys[$key] = true;
+		}
+
+		return array_diff_key($array, $assocKeys);
+	}
+
 
 	/**
 	 * Parses out partial fields to return in the response.
@@ -221,28 +271,152 @@ class RESTController extends \PhalconRest\Controllers\BaseController{
 	 * @return array               Output array.  If there are records (even 1), every record will be an array ex: array(array('id'=>1),array('id'=>2))
 	 */
 	protected function respond($recordsArray){
-
-		if(!is_array($recordsArray)){
-			// This is bad.  Throw a 500.  Responses should always be arrays.
-			throw new HTTPException(
-				"An error occured while retrieving records.",
-				500,
-				array(
-					'dev' => 'The records returned were malformed.',
-					'internalCode' => 'RESP1000',
-					'more' => ''
-				)
-			);
-		}
-
 		// No records returned, so return an empty array
 		if(count($recordsArray) < 1){
 			return array();
 		}
-
-		return array($recordsArray);
-
+		$results=array($recordsArray);
+		$results=$this->filter($results);
+		return $results;
 	}
 
 
+	public function get($id){
+		$record=$this->model->findFirst($id);
+		if($record)
+			return $this->respond($record->toArray());
+		else
+			throw new HTTPException('Not Found',HTTPException::HTTP_NOT_FOUND);
+
+	}
+
+	public function getList(){
+		if($this->isSearch){
+			$results = $this->search($this->model->find());
+		} else {
+			$results = $this->model->find();
+		}
+
+		return $this->respond($results);
+	}
+
+	public function search($records){
+
+		$results = array();
+		if(count($records))
+		{
+			foreach($records as $record){
+				$record=$record->toArray();
+				$match = true;
+				if(count($this->searchFields))
+				{
+					foreach ($this->searchFields as $field => $value) {
+						if(!(strpos($record[$field], $value) !== FALSE)){
+							$match = false;
+						}
+					}
+
+				}
+				if($match){
+					$results[] = $record;
+				}
+
+			}
+
+		}
+		return $results;
+	}
+
+	public function filter($results){
+		if($this->excludeFields){
+
+			foreach($results as $record){
+				$newResults[] = $this->array_remove_keys($record, $this->excludeFields);
+			}
+			$results = $newResults;
+		}
+		if($this->isPartial){
+			$newResults = array();
+			$remove = array_diff(array_keys($this->$results[0]), $this->partialFields);
+			foreach($results as $record){
+				$newResults[] = $this->array_remove_keys($record, $remove);
+			}
+			$results = $newResults;
+		}
+		if($this->offset){
+			$results = array_slice($results, $this->offset);
+		}
+		if($this->limit){
+			$results = array_slice($results, 0, $this->limit);
+		}
+		return $results;
+	}
+
+
+	/**
+	 * Creates a new user
+	 */
+	public function create()
+	{
+
+		if($this->modelFields){
+			foreach($this->modelFields as $field)
+			{
+				$this->model->$field=$this->request->getPost($field);
+			}
+		}
+
+		if (!$this->model->save()) {
+			foreach ($this->model->getMessages() as $message) {
+
+				throw new HTTPException($message,HTTPException::HTTP_BAD_REQUEST);
+			}
+		}else{
+			throw new HTTPException('Successfully Created',HTTPException::HTTP_CREATED);
+		}
+
+	}
+
+	public function edit($id)
+	{
+			$modelRecord = $this->model->findFirst($id);
+			if (!$modelRecord) {
+				throw new HTTPException("Not found",HTTPException::HTTP_NOT_FOUND);
+			}else
+			{
+				if($this->modelFields){
+					foreach($this->modelFields as $field)
+					{
+						$requestParam=$this->request->getPut($field);
+						if(isset($requestParam))
+							$modelRecord->$field=$requestParam;
+					}
+				}
+			}
+			if (!$modelRecord->save()) {
+				foreach ($modelRecord->getMessages() as $message) {
+
+					throw new HTTPException($message,HTTPException::HTTP_BAD_REQUEST);
+				}
+			}else{
+				throw new HTTPException('Successfully Updated',HTTPException::HTTP_OK);
+			}
+	}
+
+
+	public function delete($id)
+	{
+		$modelRecord = $this->model->findFirst($id);
+		if (!$modelRecord) {
+			throw new HTTPException("Not found",HTTPException::HTTP_NOT_FOUND);
+		}
+
+		if (!$modelRecord->delete()) {
+
+			foreach ($modelRecord->getMessages() as $message) {
+				throw new HTTPException($message,HTTPException::HTTP_BAD_REQUEST);
+			}
+		}
+		throw new HTTPException('Successfully deleted',HTTPException::HTTP_OK);
+	}
 }
